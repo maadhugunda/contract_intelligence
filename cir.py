@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Any,Optional,List
+from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 class ElementType(str, Enum):
@@ -14,19 +14,19 @@ class Element(BaseModel):
     page_number: int = Field(ge=1)
     order: int = Field(ge=0)
     type: ElementType
-    text: Optional[str] = None
-    structured_content: Optional[dict[str, Any]] = None
-    parent_id: Optional[str] = None
-    source_ref: Optional[str] = None
+    text: str | None = None
+    structured_content: dict[str, Any] | None = None
+    parent_id: str | None = None
+    source_ref: str | None = None
     extraction_method: str
-    confidence: Optional[float] = Field(default=None, ge=0, le=1)
-    security_source_ids: List[str] = Field(default_factory=list)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    security_source_ids: list[str] = Field(default_factory=list)
 
 class Relationship(BaseModel):
     source_id: str
     target_id: str
     type: str
-    confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    confidence: float | None = Field(default=None, ge=0, le=1)
 
 class CIRSnapshot(BaseModel):
     schema_version: str = '0.1'
