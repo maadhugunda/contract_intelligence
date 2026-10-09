@@ -1,23 +1,33 @@
-# Contract Intelligence — CIR starter
+# Healthcare Contract Intelligence — Phase A starter
 
-Initial Pydantic CIR schema (v0.1), with element identity, extraction provenance, security source identifiers, relationships, and a versioned snapshot.
+A fictional healthcare-focused B2B contract intelligence capstone. No patient data or real parties.
 
-Install: `pip install 'pydantic>=2,<3'`
+## D0 dataset
 
-Test: `python -m unittest discover -s . -p 'test_*.py'`
+`datasets/d0/contracts/` contains five digitally generated PDFs: MSA, BAA, SOW, pricing schedule, amendment. `datasets/d0/manifest.json` records SHA-256 hashes; `datasets/d0/ground_truth/questions.json` provides six independent evaluation cases including amendment supersession and abstention.
 
-This is a starter contract, not a complete production CIR. Next: document/page models, immutable snapshot writer, projection store, adapters, richer source geometry, and extraction lineage.
+## Existing CIR v0.3
 
-## Task registry (v0.1)
-`task_registry.py` adds SQLite-backed task leases, monotonically increasing fencing generations, renewal, and conditional result publication. It assumes artifacts are written immutably and validated before `commit_result`; manifest publication and artifact validation are next milestones.
+`src/cir.py` and `src/task_registry.py` are carried forward from the prior CIR v0.3 archive, along with its tests. They are NOT yet integrated into the new extraction flow.
 
-Run: `python -m unittest discover -v`
+## Run first extraction
 
-## v0.3 commit semantics
-`commit_result()` returns `CommitOutcome(status, state_changed, accepted_generation)`.
-An exact retry from the previously accepted owner/generation with the same URI and hash
-returns `ALREADY_COMMITTED` even after lease expiry. A different result returns `CONFLICT`.
-An uncommitted expired or superseded lease returns `STALE_LEASE`.
-The first commit transactionally inserts one `TaskCompleted` outbox record. Publishing
-and consumer-side deduplication are not yet implemented. This starter assumes immutable
-artifacts are independently verified by the caller and does not yet include migration logic.
+```bash
+python -m pip install pymupdf pydantic
+python scripts/inspect_pdf.py datasets/d0/contracts/HC001-MSA.pdf
+python -m unittest discover -s src -p 'test_*.py' -v
+```
+
+## Day 1 engineering assignment
+
+1. Create a private GitHub repository and commit this starter (do not commit credentials).
+2. Implement `extract_document(pdf_path, document_id, source_revision_id)` in `src/extraction.py`, returning a CIR-compatible document/page/element representation with page references and provenance.
+3. Write tests verifying all five PDFs can be read, document IDs match, and source hashes are verified against the manifest.
+4. Preserve text order and section numbering. Do not yet add OCR, embeddings, or LLM calls.
+5. Open a pull request and share the diff/repository access for review.
+
+**Definition of done:** deterministic extraction of all five PDFs with page numbers, text provenance, passing tests, and no silently dropped pages. A first grounded Q&A is the subsequent milestone.
+
+## Architecture guardrails
+
+Modular monolith; open-source first; immutable raw source; CIR distinct from canonical legal knowledge; applicability is not equivalent to retrieval; never use employer data or real PHI.
