@@ -1,4 +1,5 @@
 """SQLite task leasing, fenced publication, idempotent acknowledgments, and outbox."""
+from __future__ import annotations
 import sqlite3
 import time
 from dataclasses import dataclass
