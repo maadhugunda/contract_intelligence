@@ -40,7 +40,26 @@ blocks retain lines, spans, font attributes and bounding boxes; image blocks ret
 placement and metadata. CIR elements carry this layout in `structured_content`.
 Blank or image-only pages remain present with a warning. Source files are never
 modified. Run and element IDs are deterministic for the same document, version,
-source bytes and extraction engine metadata.
+source bytes and extraction engine metadata. Workers should pass an explicit
+`extraction_run_id` created and persisted when the logical extraction is queued.
+Every retry reuses that ID, including after a crash; lease generations and worker
+attempt IDs must not replace it. A deliberate new extraction of the same PDF gets
+a fresh run ID, producing distinct element IDs. Use `--extraction-run-id` in the
+CLI. Omitting the ID retains deterministic content-derived identity for local use.
+Element IDs also bind document/version, source hash and pipeline metadata: changing
+those inputs produces different IDs. Pin the engine/settings and pass
+`expected_sha256` on retries. This service currently re-extracts the full document;
+stable block IDs support idempotent downstream writes, not partial extraction yet.
+
+```python
+# Create and persist this once when queuing the job (for example, a UUID).
+logical_run_id = 'extraction-job-001'
+document = extract_document(
+    'datasets/d0/contracts/HC001-MSA.pdf', 'HC001-MSA', 'v1',
+    extraction_run_id=logical_run_id,
+)
+# A retry uses logical_run_id again. A new job receives a new ID.
+```
 
 Reading order uses PyMuPDF's geometric block ordering. Section numbers are kept
 verbatim. During CIR conversion, `src/section_structure.py` detects standalone

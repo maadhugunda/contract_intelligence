@@ -132,9 +132,12 @@ class ExtractionService:
         self.adapters = {'.pdf': PDFExtractor()} if adapters is None else adapters
 
     def extract(self, source_path: str | Path, document_id: str, source_version_id: str,
-                *, expected_sha256: str | None = None) -> ExtractedDocument:
+                *, expected_sha256: str | None = None,
+                extraction_run_id: str | None = None) -> ExtractedDocument:
         if not document_id.strip() or not source_version_id.strip():
             raise ExtractionError('document_id and source_version_id must be non-empty')
+        if extraction_run_id is not None and not extraction_run_id.strip():
+            raise ExtractionError('extraction_run_id must be non-empty when supplied')
         path = Path(source_path).expanduser().resolve(strict=True)
         adapter = self.adapters.get(path.suffix.lower())
         if adapter is None:
@@ -148,14 +151,20 @@ class ExtractionService:
         if not pages or [p.page_number for p in pages] != list(range(1, len(pages) + 1)):
             raise ExtractionError('Adapter must return every page in contiguous order')
         identity = json.dumps([document_id, source_version_id, digest, metadata], sort_keys=True)
-        run_id = hashlib.sha256(identity.encode()).hexdigest()
+        default_run_id = hashlib.sha256(identity.encode()).hexdigest()
+        run_id = extraction_run_id if extraction_run_id is not None else default_run_id
+        # A logical extraction ID is persisted by the caller before dispatching
+        # work. Attempt/lease IDs must never be used here. Bind element identity
+        # to source and pipeline too, so changed inputs cannot reuse block IDs.
+        element_namespace = (default_run_id if extraction_run_id is None else
+                             hashlib.sha256(json.dumps([run_id, default_run_id]).encode()).hexdigest())
         for page in pages:
             page.provenance = {'document_id': document_id, 'source_version_id': source_version_id,
                                'source_path': str(path), 'source_sha256': digest,
                                'page_number': page.page_number,
                                'source_ref': f'{path.as_uri()}#page={page.page_number}'}
             for order, block in enumerate(page.blocks):
-                block.update(order=order, element_id=f'{run_id}:p{page.page_number}:b{order}',
+                block.update(order=order, element_id=f'{element_namespace}:p{page.page_number}:b{order}',
                              source_ref=f'{path.as_uri()}#page={page.page_number}&block={order}',
                              provenance=dict(page.provenance))
         return ExtractedDocument(
@@ -166,6 +175,13 @@ class ExtractionService:
 
 
 def extract_document(source_path: str | Path, document_id: str, source_version_id: str,
-                     *, expected_sha256: str | None = None) -> ExtractedDocument:
+                     *, expected_sha256: str | None = None,
+                     extraction_run_id: str | None = None) -> ExtractedDocument:
+    """Retries reuse extraction_run_id; new logical extractions use a fresh ID.
+
+    Omitting it retains deterministic content-derived identity for local use.
+    Caller must persist the ID and pin source hash/engine settings across retries.
+    """
     return ExtractionService().extract(source_path, document_id, source_version_id,
-                                       expected_sha256=expected_sha256)
+                                       expected_sha256=expected_sha256,
+                                       extraction_run_id=extraction_run_id)

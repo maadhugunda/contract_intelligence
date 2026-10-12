@@ -53,6 +53,27 @@ class ExtractionTests(unittest.TestCase):
         with self.assertRaisesRegex(ExtractionError, 'SHA-256'):
             self.service.extract(self.path, 'D', 'V', expected_sha256='0' * 64)
 
+    def test_retry_ids_and_new_extraction_ids(self):
+        original = self.service.extract(self.path, 'D', 'V', extraction_run_id='job-1')
+        retry = self.service.extract(self.path, 'D', 'V', extraction_run_id='job-1')
+        fresh = self.service.extract(self.path, 'D', 'V', extraction_run_id='job-2')
+        ids = lambda result: [e.element_id for e in result.to_cir().elements]
+        self.assertEqual(original, retry)
+        self.assertEqual(original.extraction_run_id, 'job-1')
+        self.assertEqual(ids(original), ids(retry))
+        self.assertTrue(set(ids(original)).isdisjoint(ids(fresh)))
+        # Retrying only a selected block retains its original deterministic ID.
+        self.assertEqual(original.pages[0].blocks[1]['element_id'],
+                         retry.pages[0].blocks[1]['element_id'])
+        copied = self.path.with_name('copied.pdf')
+        copied.write_bytes(self.path.read_bytes())
+        self.assertEqual(ids(original), ids(self.service.extract(copied, 'D', 'V', extraction_run_id='job-1')))
+        self.path.write_bytes(b'changed source')
+        self.assertTrue(set(ids(original)).isdisjoint(ids(
+            self.service.extract(self.path, 'D', 'V', extraction_run_id='job-1'))))
+        with self.assertRaises(ExtractionError):
+            self.service.extract(self.path, 'D', 'V', extraction_run_id=' ')
+
     def test_invalid_inputs(self):
         with self.assertRaises(ExtractionError):
             self.service.extract(self.path, '', 'V')

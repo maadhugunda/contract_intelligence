@@ -15,11 +15,13 @@ def main():
     parser.add_argument('--document-id', required=True)
     parser.add_argument('--source-version-id', required=True)
     parser.add_argument('--expected-sha256')
+    parser.add_argument('--extraction-run-id', help='Persist and reuse for retries; use a fresh ID for a new extraction')
     parser.add_argument('--format', choices=['extraction', 'cir'], default='cir')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     result = extract_document(args.source_path, args.document_id, args.source_version_id,
-                              expected_sha256=args.expected_sha256)
+                              expected_sha256=args.expected_sha256,
+                              extraction_run_id=args.extraction_run_id)
     payload = (result.to_cir() if args.format == 'cir' else result).model_dump_json(indent=2)
     if args.output:
         args.output.write_text(payload + '\n', encoding='utf-8')
