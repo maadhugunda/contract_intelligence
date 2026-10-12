@@ -1,0 +1,63 @@
+import hashlib
+import tempfile
+import unittest
+from pathlib import Path
+from task_registry import TaskRegistry, CommitStatus
+
+DIGEST = hashlib.sha256(b'immutable output').hexdigest()
+OTHER = hashlib.sha256(b'different output').hexdigest()
+
+class RegistryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.registry = TaskRegistry(str(Path(self.tmp.name) / 'tasks.db'))
+        self.registry.create_task('T3')
+
+    def test_stale_worker_cannot_commit(self):
+        a = self.registry.acquire_lease('T3', 'A', ttl=10, now=100)
+        self.assertIsNone(self.registry.acquire_lease('T3', 'B', ttl=10, now=105))
+        b = self.registry.acquire_lease('T3', 'B', ttl=10, now=110)
+        self.assertEqual((a.generation, b.generation), (1, 2))
+        self.assertEqual(self.registry.commit_result(a, 'a.json', DIGEST, now=111).status, CommitStatus.STALE_LEASE)
+        self.assertEqual(self.registry.commit_result(b, 'b.json', DIGEST, now=111).status, CommitStatus.COMMITTED)
+        self.assertEqual(self.registry.get_task('T3')['artifact_uri'], 'b.json')
+
+    def test_renewal_prevents_takeover(self):
+        a = self.registry.acquire_lease('T3', 'A', ttl=10, now=100)
+        self.assertTrue(self.registry.renew_lease(a, ttl=10, now=105))
+        self.assertIsNone(self.registry.acquire_lease('T3', 'B', now=111))
+        self.assertEqual(self.registry.commit_result(a, 'a.json', DIGEST, now=111).status, CommitStatus.COMMITTED)
+        self.assertIsNone(self.registry.acquire_lease('T3', 'B', now=120))
+
+    def test_expired_lease_cannot_renew_or_commit(self):
+        a = self.registry.acquire_lease('T3', 'A', ttl=10, now=100)
+        self.assertFalse(self.registry.renew_lease(a, now=110))
+        self.assertEqual(self.registry.commit_result(a, 'a.json', DIGEST, now=110).status, CommitStatus.STALE_LEASE)
+
+    def test_idempotent_retry_after_expiry_one_outbox_event(self):
+        self.registry.create_task('T3')
+        a = self.registry.acquire_lease('T3', 'A', ttl=10, now=100)
+        first = self.registry.commit_result(a, 'a.json', DIGEST, now=101)
+        retry = self.registry.commit_result(a, 'a.json', DIGEST, now=999)
+        self.assertEqual(first.status, CommitStatus.COMMITTED)
+        self.assertTrue(first.state_changed)
+        self.assertEqual(retry.status, CommitStatus.ALREADY_COMMITTED)
+        self.assertFalse(retry.state_changed)
+        self.assertEqual(len(self.registry.get_outbox_events()), 1)
+
+    def test_different_artifact_conflicts(self):
+        a = self.registry.acquire_lease('T3', 'A', now=100)
+        self.registry.commit_result(a, 'a.json', DIGEST, now=101)
+        self.assertEqual(self.registry.commit_result(a, 'other.json', OTHER, now=102).status, CommitStatus.CONFLICT)
+        self.assertEqual(self.registry.get_task('T3')['artifact_uri'], 'a.json')
+        self.assertEqual(len(self.registry.get_outbox_events()), 1)
+
+    def test_stale_attempt_not_accepted_even_same_hash(self):
+        a = self.registry.acquire_lease('T3', 'A', ttl=10, now=100)
+        b = self.registry.acquire_lease('T3', 'B', ttl=10, now=110)
+        self.registry.commit_result(b, 'same.json', DIGEST, now=111)
+        self.assertEqual(self.registry.commit_result(a, 'same.json', DIGEST, now=112).status, CommitStatus.CONFLICT)
+
+if __name__ == '__main__':
+    unittest.main()
