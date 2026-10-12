@@ -1,0 +1,62 @@
+[
+  {
+    "id": "Q01",
+    "question": "Can Meridian use Northstar data to train its general-purpose AI models?",
+    "as_of": "2026-08-01",
+    "expected": "No, not without separate written authorization.",
+    "evidence": [
+      "HC001-MSA:3"
+    ],
+    "decision": "DENY_WITHOUT_AUTHORIZATION"
+  },
+  {
+    "id": "Q02",
+    "question": "What is the maximum annual subscription increase for SOW 001 in August 2026?",
+    "as_of": "2026-08-01",
+    "expected": "5 percent under Amendment 001, not the original 3 percent.",
+    "evidence": [
+      "HC001-AMD01:2",
+      "HC001-MSA:4"
+    ],
+    "decision": "FIVE_PERCENT"
+  },
+  {
+    "id": "Q03",
+    "question": "How quickly must Meridian report a confirmed PHI breach in August 2026?",
+    "as_of": "2026-08-01",
+    "expected": "Without unreasonable delay and no later than 5 calendar days after discovery.",
+    "evidence": [
+      "HC001-AMD01:3",
+      "HC001-BAA:3"
+    ],
+    "decision": "FIVE_DAYS"
+  },
+  {
+    "id": "Q04",
+    "question": "What breach reporting deadline applied in March 2026?",
+    "as_of": "2026-03-01",
+    "expected": "Without unreasonable delay and no later than 10 calendar days after discovery.",
+    "evidence": [
+      "HC001-BAA:3"
+    ],
+    "decision": "TEN_DAYS"
+  },
+  {
+    "id": "Q05",
+    "question": "Does the contract authorize autonomous clinical treatment recommendations?",
+    "as_of": "2026-08-01",
+    "expected": "No. The SOW explicitly excludes autonomous treatment recommendations.",
+    "evidence": [
+      "HC001-SOW:3"
+    ],
+    "decision": "EXCLUDED"
+  },
+  {
+    "id": "Q06",
+    "question": "What is the allowed increase for cloud hosting services in 2027?",
+    "as_of": "2027-01-01",
+    "expected": "Insufficient evidence; cloud hosting pricing is not specified in these documents.",
+    "evidence": [],
+    "decision": "ABSTAIN"
+  }
+]

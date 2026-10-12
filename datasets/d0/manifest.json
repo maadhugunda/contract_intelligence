@@ -1,0 +1,41 @@
+{
+  "dataset_id": "HC-D0-v1",
+  "fictional": true,
+  "documents": [
+    {
+      "document_id": "HC001-MSA",
+      "file": "HC001-MSA.pdf",
+      "sha256": "e5ad08a24a441ecef69a1e3c73d0f8fefdd0a60dd8ff08c4f72d559de30162cb",
+      "effective_date": "2026-01-01",
+      "clause_count": 6
+    },
+    {
+      "document_id": "HC001-BAA",
+      "file": "HC001-BAA.pdf",
+      "sha256": "25226c758bb07c1eb85c7df096150ce5142fcac5027a792de06a060666c31e3c",
+      "effective_date": "2026-01-01",
+      "clause_count": 5
+    },
+    {
+      "document_id": "HC001-SOW",
+      "file": "HC001-SOW.pdf",
+      "sha256": "e18b96d68ad772b18ccd0dd804bbbda29ccb7f9ab8b94e3152ee99870a756bae",
+      "effective_date": "2026-02-01",
+      "clause_count": 4
+    },
+    {
+      "document_id": "HC001-PRICING",
+      "file": "HC001-PRICING.pdf",
+      "sha256": "b00dffe12b31eb6a89adf03d13be7cd6d99392bbb5e7b1b2364a33856c791400",
+      "effective_date": "2026-02-01",
+      "clause_count": 3
+    },
+    {
+      "document_id": "HC001-AMD01",
+      "file": "HC001-AMD01.pdf",
+      "sha256": "7b6eec3d873c02b4bfbf2c7236d05afab620c659dcafcefe568d62ee6503febe",
+      "effective_date": "2026-07-01",
+      "clause_count": 4
+    }
+  ]
+}
