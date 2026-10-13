@@ -54,7 +54,7 @@ class PageExtraction(BaseModel):
 class ExtractedDocument(BaseModel):
     document_id: str
     source_version_id: str
-    source_path: str
+    source_artifact_ref: str
     source_sha256: str
     source_format: str
     extraction_run_id: str
@@ -78,7 +78,7 @@ class ExtractedDocument(BaseModel):
         return CIRSnapshot(
             document_id=self.document_id, source_revision_id=self.source_version_id,
             extraction_run_id=self.extraction_run_id, elements=elements, relationships=relationships,
-            source_path=self.source_path, source_sha256=self.source_sha256,
+            source_artifact_ref=self.source_artifact_ref, source_sha256=self.source_sha256,
             source_format=self.source_format, extraction_metadata=self.extraction_metadata,
             pipeline_fingerprint=self.pipeline_fingerprint,
             pages=[p.model_dump(exclude={'blocks'}) for p in self.pages],
@@ -167,6 +167,7 @@ class ExtractionService:
             raise ExtractionError(f'Unsupported source format: {path.suffix}')
         content = path.read_bytes()
         digest = hashlib.sha256(content).hexdigest()
+        artifact_ref = f'urn:sha256:{digest}'
         if expected_sha256 is not None and digest != expected_sha256.lower():
             raise ExtractionError('Source SHA-256 does not match expected hash')
         pages, metadata = adapter.extract(content)
@@ -186,16 +187,16 @@ class ExtractionService:
         metadata = {**metadata, 'pipeline_manifest': manifest}
         for page in pages:
             page.provenance = {'document_id': document_id, 'source_version_id': source_version_id,
-                               'source_path': str(path), 'source_sha256': digest,
+                               'source_artifact_ref': artifact_ref, 'source_sha256': digest,
                                'extraction_run_id': run_id, 'pipeline_fingerprint': pipeline_digest,
                                'page_number': page.page_number,
-                               'source_ref': f'{path.as_uri()}#page={page.page_number}'}
+                               'source_ref': f'{artifact_ref}#page={page.page_number}'}
             for order, block in enumerate(page.blocks):
                 block.update(order=order, element_id=f'{element_namespace}:p{page.page_number}:b{order}',
-                             source_ref=f'{path.as_uri()}#page={page.page_number}&block={order}',
+                             source_ref=f'{artifact_ref}#page={page.page_number}&block={order}',
                              provenance=dict(page.provenance))
         return ExtractedDocument(
-            document_id=document_id, source_version_id=source_version_id, source_path=str(path),
+            document_id=document_id, source_version_id=source_version_id, source_artifact_ref=artifact_ref,
             source_sha256=digest, source_format=path.suffix.lower()[1:], extraction_run_id=run_id,
             pipeline_fingerprint=pipeline_digest,
             extraction_metadata=metadata, pages=pages,

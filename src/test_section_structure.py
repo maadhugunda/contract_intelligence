@@ -36,6 +36,10 @@ class SectionStructureTests(unittest.TestCase):
         elements, pages = self.multipage_example()
         original = [e.text for e in elements]
         relationships = assign_section_parents(elements, pages)
+        counts = {}
+        for element in elements:
+            element.order = counts.get(element.page_number, 0)
+            counts[element.page_number] = element.order + 1
         by_id = {e.element_id: e for e in elements}
         for id in ('header1', 'header2', 'footer1', 'footer2'):
             self.assertIsNone(by_id[id].parent_id)

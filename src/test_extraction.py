@@ -11,6 +11,7 @@ from cir import CIRSnapshot
 from extraction import ExtractionError, ExtractionService, PageExtraction, extract_document
 from task_registry import TaskRegistry
 from unittest.mock import patch
+from pydantic import ValidationError
 
 ROOT = Path(__file__).resolve().parents[1]
 HAS_PDF = importlib.util.find_spec('fitz') is not None
@@ -41,7 +42,7 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(len(result.pages), 2)
         cir = CIRSnapshot.model_validate_json(result.to_cir().model_dump_json())
         self.assertEqual(cir.source_revision_id, 'V1')
-        self.assertEqual(cir.pages[1]['text'], '')
+        self.assertEqual(cir.pages[1].text, '')
         self.assertEqual([e.order for e in cir.elements], [0, 1])
         self.assertEqual(cir.elements[0].text, '1. Terms')
         self.assertEqual(cir.elements[0].structured_content['bbox'], [0, 0, 50, 10])
@@ -55,6 +56,31 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(self.service.extract(self.path, 'D', 'V', expected_sha256=digest).source_sha256, digest)
         with self.assertRaisesRegex(ExtractionError, 'SHA-256'):
             self.service.extract(self.path, 'D', 'V', expected_sha256='0' * 64)
+
+    def test_stable_artifact_and_invalid_references(self):
+        result = self.service.extract(self.path, 'D', 'V')
+        moved = self.path.with_name('moved.pdf')
+        moved.write_bytes(self.path.read_bytes())
+        self.assertEqual(result, self.service.extract(moved, 'D', 'V'))
+        self.assertNotIn(str(self.path), result.model_dump_json())
+        self.assertEqual(result.source_artifact_ref, 'urn:sha256:' + result.source_sha256)
+        for case in ('missing_page', 'duplicate_page', 'wrong_ref', 'wrong_artifact', 'provenance', 'order'):
+            with self.subTest(case=case):
+                payload = result.to_cir().model_dump()
+                if case == 'missing_page':
+                    payload['elements'][0]['page_number'] = 3
+                elif case == 'duplicate_page':
+                    payload['pages'][1]['page_number'] = 1
+                elif case == 'wrong_ref':
+                    payload['elements'][0]['source_ref'] = 'urn:sha256:wrong#page=1&block=0'
+                elif case == 'wrong_artifact':
+                    payload['source_artifact_ref'] = 'urn:sha256:' + '0' * 64
+                elif case == 'provenance':
+                    payload['pages'][0]['provenance']['document_id'] = 'other'
+                else:
+                    payload['elements'][1]['order'] = 0
+                with self.assertRaises(ValidationError):
+                    CIRSnapshot.model_validate(payload)
 
     def test_retry_ids_and_new_extraction_ids(self):
         original = self.service.extract(self.path, 'D', 'V', extraction_run_id='job-1')

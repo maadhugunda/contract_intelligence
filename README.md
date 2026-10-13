@@ -35,6 +35,21 @@ payload = snapshot.model_dump_json(indent=2)
 
 The service reads and hashes the same source bytes, extracts every page, and then
 converts to CIR explicitly. `source_version_id` maps to CIR's `source_revision_id`.
+Source provenance uses `source_artifact_ref = urn:sha256:<source hash>` rather
+than a local file path. Page references append `#page=N`; element references append
+`#page=N&block=B`. These identifiers survive copying or relocating the PDF.
+The input path is only used to load bytes and is not emitted in extraction or CIR.
+An artifact resolver/storage layer must map this identity to actual source bytes;
+the URN is not itself a download URL.
+
+CIR validates ordered contiguous page records, element page membership and unique
+per-page order, artifact hashes and page/block provenance, heading parents, and
+relationship endpoints. Duplicate/self relationships are rejected. Continuation
+links must connect adjacent-page paragraphs within the same section. Legacy CIR
+without an artifact reference may omit pages; new artifact-backed output cannot.
+`pages` now contains typed `CIRPage` models; access `snapshot.pages[0].text` in Python.
+Regenerate legacy path-based outputs to migrate to artifact provenance.
+
 Each page retains text, dimensions, rotation and source provenance. Ordered text
 blocks retain lines, spans, font attributes and bounding boxes; image blocks retain
 placement and metadata. CIR elements carry this layout in `structured_content`.
