@@ -31,7 +31,8 @@ def fingerprint(value: Any) -> str:
 def pipeline_manifest(metadata: dict[str, Any]) -> dict[str, Any]:
     """Include engine/options and executable pipeline code, excluding source paths."""
     root = Path(__file__).parent
-    return {'identity_contract_version': '2', 'settings': metadata,
+    return {'identity_contract_version': '3', 'settings': metadata,
+            'stages': ['native_extraction', 'section_structure', 'cir_conversion'],
             'code_sha256': {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
                             for name in ('extraction.py', 'section_structure.py', 'cir.py')}}
 
@@ -86,10 +87,21 @@ class ExtractedDocument(BaseModel):
 
 
 class FormatExtractor(Protocol):
+    def describe(self) -> dict[str, Any]: ...
     def extract(self, content: bytes) -> tuple[list[PageExtraction], dict[str, Any]]: ...
 
 
 class PDFExtractor:
+    def describe(self):
+        try:
+            import fitz
+        except ImportError as exc:
+            raise RuntimeError('PDF extraction requires PyMuPDF; install requirements.txt') from exc
+        return {'engine': 'pymupdf', 'engine_version': fitz.VersionBind,
+                'adapter_version': '1', 'reading_order': 'geometric',
+                'coordinate_system': 'unrotated_top_left_pdf_points',
+                'ocr_enabled': False, 'table_detection_enabled': False}
+
     def extract(self, content: bytes) -> tuple[list[PageExtraction], dict[str, Any]]:
         try:
             import fitz
@@ -138,10 +150,7 @@ class PDFExtractor:
                     rotation=page.rotation, text=text, blocks=blocks,
                     warnings=[] if text.strip() else ['no_embedded_text; OCR may be required'],
                 ))
-            return pages, {'engine': 'pymupdf', 'engine_version': fitz.VersionBind,
-                           'adapter_version': '1', 'reading_order': 'geometric',
-                           'coordinate_system': 'unrotated_top_left_pdf_points',
-                           'ocr_enabled': False, 'table_detection_enabled': False}
+            return pages, self.describe()
 
 
 class ExtractionService:
@@ -154,9 +163,10 @@ class ExtractionService:
             run_registry = TaskRegistry(str(directory / 'runs.sqlite'))
         self.run_registry = run_registry
 
-    def extract(self, source_path: str | Path, document_id: str, source_version_id: str,
+    def plan_run(self, source_path: str | Path, document_id: str, source_version_id: str,
                 *, expected_sha256: str | None = None,
-                extraction_run_id: str | None = None) -> ExtractedDocument:
+                extraction_run_id: str | None = None) -> dict[str, Any]:
+        """Coordinator: persist the contract before any adapter extraction."""
         if not document_id.strip() or not source_version_id.strip():
             raise ExtractionError('document_id and source_version_id must be non-empty')
         if extraction_run_id is not None and not extraction_run_id.strip():
@@ -167,22 +177,47 @@ class ExtractionService:
             raise ExtractionError(f'Unsupported source format: {path.suffix}')
         content = path.read_bytes()
         digest = hashlib.sha256(content).hexdigest()
-        artifact_ref = f'urn:sha256:{digest}'
         if expected_sha256 is not None and digest != expected_sha256.lower():
             raise ExtractionError('Source SHA-256 does not match expected hash')
-        pages, metadata = adapter.extract(content)
-        metadata = {**metadata, 'section_structure_version': SECTION_STRUCTURE_VERSION}
-        if not pages or [p.page_number for p in pages] != list(range(1, len(pages) + 1)):
-            raise ExtractionError('Adapter must return every page in contiguous order')
+        metadata = {**adapter.describe(), 'section_structure_version': SECTION_STRUCTURE_VERSION}
         manifest = pipeline_manifest(metadata)
         pipeline_digest = fingerprint(manifest)
         default_run_id = fingerprint([document_id, source_version_id, digest, pipeline_digest])
         run_id = extraction_run_id if extraction_run_id is not None else default_run_id
         try:
             self.run_registry.bind_extraction_run(run_id, document_id, source_version_id,
-                                                  digest, pipeline_digest)
+                                                  digest, pipeline_digest, pipeline_manifest=manifest,
+                                                  source_format=path.suffix.lower()[1:])
         except ValueError as exc:
             raise ExtractionError(str(exc)) from exc
+        return self.run_registry.get_run_contract(run_id)
+
+    def execute_run(self, source_path: str | Path, extraction_run_id: str) -> ExtractedDocument:
+        """Worker: load a registered contract, verify it, then extract. Never plans."""
+        contract = self.run_registry.get_run_contract(extraction_run_id)
+        if contract is None:
+            raise ExtractionError('Worker requires a preplanned extraction run')
+        path = Path(source_path).expanduser().resolve(strict=True)
+        adapter = self.adapters.get('.' + contract['source_format'])
+        if adapter is None or path.suffix.lower()[1:] != contract['source_format']:
+            raise ExtractionError('Source format does not match planned run')
+        content = path.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        metadata = {**adapter.describe(), 'section_structure_version': SECTION_STRUCTURE_VERSION}
+        manifest = pipeline_manifest(metadata)
+        pipeline_digest = fingerprint(manifest)
+        if (digest != contract['source_sha256'] or pipeline_digest != contract['pipeline_fingerprint']
+                or manifest != contract['pipeline_manifest']):
+            raise ExtractionError('Worker source or pipeline does not match planned run')
+        pages, actual_metadata = adapter.extract(content)
+        if actual_metadata != adapter.describe():
+            raise ExtractionError('Adapter execution settings differ from planned pipeline')
+        if not pages or [p.page_number for p in pages] != list(range(1, len(pages) + 1)):
+            raise ExtractionError('Adapter must return every page in contiguous order')
+        document_id, source_version_id = contract['document_id'], contract['source_version_id']
+        run_id = extraction_run_id
+        artifact_ref = f'urn:sha256:{digest}'
+        default_run_id = fingerprint([document_id, source_version_id, digest, pipeline_digest])
         element_namespace = fingerprint([run_id, default_run_id])
         metadata = {**metadata, 'pipeline_manifest': manifest}
         for page in pages:
@@ -201,6 +236,13 @@ class ExtractionService:
             pipeline_fingerprint=pipeline_digest,
             extraction_metadata=metadata, pages=pages,
         )
+
+    def extract(self, source_path, document_id, source_version_id, *, expected_sha256=None,
+                extraction_run_id=None):
+        """Local coordinator convenience; workers should call execute_run directly."""
+        contract = self.plan_run(source_path, document_id, source_version_id,
+                                 expected_sha256=expected_sha256, extraction_run_id=extraction_run_id)
+        return self.execute_run(source_path, contract['extraction_run_id'])
 
 
 def extract_document(source_path: str | Path, document_id: str, source_version_id: str,

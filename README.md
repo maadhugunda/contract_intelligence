@@ -78,7 +78,8 @@ Bindings from before this contract cannot be reconstructed automatically; create
 new runs for legacy outputs. This version changes generated IDs.
 
 Pin the engine/settings and pass `expected_sha256` on retries. This service
-currently re-extracts the full document and checks the binding before returning it;
+currently re-extracts the full document and validates the planned contract before
+calling the adapter;
 stable block IDs support idempotent downstream writes, not partial extraction yet.
 
 ```python
@@ -90,6 +91,36 @@ document = extract_document(
 )
 # A retry uses logical_run_id again. A new job receives a new ID.
 ```
+
+## Coordinator and worker execution
+
+`ExtractionService.plan_run(...)` is the coordinator API. It hashes source bytes,
+asks the selected adapter for its engine/options via `describe()` (without extracting
+pages), and atomically stores the source binding plus full pipeline manifest in the
+registry. `execute_run(source_path, run_id)` is the worker API: it requires a planned
+run, loads document/version/format from the registry, and checks source and pipeline
+before calling the adapter. Workers never create runs. Adapters must declare their
+implementation version and behavior-affecting settings in `describe()`.
+
+```bash
+# Coordinator: persist the contract before dispatch.
+contractintelligence/bin/python scripts/extract_document.py datasets/d0/contracts/HC001-MSA.pdf \
+  --mode plan --document-id HC001-MSA --source-version-id v1 \
+  --extraction-run-id msa-planned-001 --output output/extraction/msa-run-contract.json
+
+# Worker: load that contract; reuse the run ID on every retry.
+contractintelligence/bin/python scripts/extract_document.py datasets/d0/contracts/HC001-MSA.pdf \
+  --mode worker --extraction-run-id msa-planned-001 --format cir \
+  --output output/extraction/HC001-MSA.cir.json
+```
+
+Both processes must use the same registry (`--registry PATH` overrides the default).
+The default `--mode local` and `extract_document(...)` remain convenience coordinators
+that plan then execute. For queued tasks, use `create_extraction_task(task_id, run_id,
+stage)` to persist an immutable association with a declared stage before leasing.
+The current worker executes the full document pipeline; separate per-stage/page
+workers and dispatch are not implemented. Legacy bindings without a persisted
+manifest cannot be executed by workers; plan a new run.
 
 Reading order uses PyMuPDF's geometric block ordering. Section numbers are kept
 verbatim. During CIR conversion, `src/section_structure.py` detects standalone

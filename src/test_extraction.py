@@ -18,6 +18,8 @@ HAS_PDF = importlib.util.find_spec('fitz') is not None
 
 
 class StubAdapter:
+    def describe(self):
+        return {'engine': 'stub'}
     def extract(self, content):
         return [PageExtraction(page_number=1, width=100, height=200, rotation=0,
                                text='1. Terms\n\nBody', blocks=[
@@ -28,6 +30,34 @@ class StubAdapter:
 
 
 class ExtractionTests(unittest.TestCase):
+    def test_worker_requires_planning_and_checks_before_extraction(self):
+        adapter = self.service.adapters['.pdf']
+        with patch.object(adapter, 'extract', wraps=adapter.extract) as extract:
+            with self.assertRaisesRegex(ExtractionError, 'preplanned'):
+                self.service.execute_run(self.path, 'planned-job')
+            contract = self.service.plan_run(self.path, 'D', 'V', extraction_run_id='planned-job')
+            extract.assert_not_called()
+            self.registry.create_extraction_task('task-1', 'planned-job')
+            self.assertIsNotNone(self.registry.acquire_lease('task-1', 'worker-1'))
+            result = self.service.execute_run(self.path, 'planned-job')
+            self.assertEqual(result.pipeline_fingerprint, contract['pipeline_fingerprint'])
+            self.assertEqual(extract.call_count, 1)
+            self.path.write_bytes(b'changed')
+            with self.assertRaisesRegex(ExtractionError, 'does not match'):
+                self.service.execute_run(self.path, 'planned-job')
+            self.assertEqual(extract.call_count, 1)
+            self.path.write_bytes(b'source bytes')
+            with patch('extraction.SECTION_STRUCTURE_VERSION', 'other'):
+                with self.assertRaisesRegex(ExtractionError, 'does not match'):
+                    self.service.execute_run(self.path, 'planned-job')
+            self.assertEqual(extract.call_count, 1)
+
+    def test_worker_cannot_register_legacy_unplanned_binding(self):
+        self.registry.bind_extraction_run('legacy', 'D', 'V', 'a' * 64, 'b' * 64)
+        with self.assertRaisesRegex(ExtractionError, 'preplanned'):
+            self.service.execute_run(self.path, 'legacy')
+        self.assertIsNone(self.registry.get_run_contract('legacy'))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -130,6 +160,8 @@ class ExtractionTests(unittest.TestCase):
 
     def test_missing_page_rejected(self):
         class BrokenAdapter:
+            def describe(self):
+                return {}
             def extract(self, content):
                 return [PageExtraction(page_number=2, width=1, height=1, rotation=0, text='')], {}
         with self.assertRaisesRegex(ExtractionError, 'every page'):

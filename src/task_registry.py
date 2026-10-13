@@ -1,6 +1,7 @@
 """SQLite task leasing, fenced publication, idempotent acknowledgments, and outbox."""
 from __future__ import annotations
 import sqlite3
+import json
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -43,9 +44,16 @@ class TaskRegistry:
                 extraction_run_id TEXT PRIMARY KEY, document_id TEXT NOT NULL,
                 source_version_id TEXT NOT NULL, source_sha256 TEXT NOT NULL,
                 pipeline_fingerprint TEXT NOT NULL)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS extraction_run_contracts (
+                extraction_run_id TEXT PRIMARY KEY, source_format TEXT NOT NULL,
+                pipeline_manifest TEXT NOT NULL)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS extraction_tasks (
+                task_id TEXT PRIMARY KEY, extraction_run_id TEXT NOT NULL,
+                stage TEXT NOT NULL)''')
 
     def bind_extraction_run(self, extraction_run_id, document_id, source_version_id,
-                            source_sha256, pipeline_fingerprint):
+                            source_sha256, pipeline_fingerprint, *, pipeline_manifest=None,
+                            source_format=None):
         """Atomically register an immutable binding, or acknowledge an exact retry."""
         values = (extraction_run_id, document_id, source_version_id,
                   source_sha256, pipeline_fingerprint)
@@ -61,6 +69,45 @@ class TaskRegistry:
                              (extraction_run_id,)).fetchone()
             if tuple(row) != values:
                 raise ValueError('Extraction run is already bound to a different source or pipeline')
+            if pipeline_manifest is not None:
+                if not source_format:
+                    raise ValueError('Planned run requires source format')
+                serialized = json.dumps(pipeline_manifest, sort_keys=True, separators=(',', ':'), allow_nan=False)
+                import hashlib
+                if hashlib.sha256(serialized.encode()).hexdigest() != pipeline_fingerprint:
+                    raise ValueError('Pipeline manifest fingerprint mismatch')
+                db.execute('INSERT OR IGNORE INTO extraction_run_contracts VALUES (?, ?, ?)',
+                           (extraction_run_id, source_format, serialized))
+                contract = db.execute('SELECT source_format, pipeline_manifest FROM extraction_run_contracts WHERE extraction_run_id=?',
+                                      (extraction_run_id,)).fetchone()
+                if tuple(contract) != (source_format, serialized):
+                    raise ValueError('Extraction run contract is immutable')
+
+    def get_run_contract(self, extraction_run_id):
+        with self._db() as db:
+            row = db.execute('''SELECT r.*, c.source_format, c.pipeline_manifest
+                FROM extraction_runs r JOIN extraction_run_contracts c USING (extraction_run_id)
+                WHERE extraction_run_id=?''', (extraction_run_id,)).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            result['pipeline_manifest'] = json.loads(result['pipeline_manifest'])
+            return result
+
+    def create_extraction_task(self, task_id, extraction_run_id, stage='native_extraction'):
+        """Associate a leased task with a preplanned run/stage, immutably."""
+        with self._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT pipeline_manifest FROM extraction_run_contracts WHERE extraction_run_id=?',
+                             (extraction_run_id,)).fetchone()
+            if row is None or stage not in json.loads(row[0])['stages']:
+                raise ValueError('Task requires a planned run and known pipeline stage')
+            db.execute('INSERT OR IGNORE INTO tasks(task_id) VALUES (?)', (task_id,))
+            db.execute('INSERT OR IGNORE INTO extraction_tasks VALUES (?, ?, ?)',
+                       (task_id, extraction_run_id, stage))
+            bound = db.execute('SELECT extraction_run_id, stage FROM extraction_tasks WHERE task_id=?', (task_id,)).fetchone()
+            if tuple(bound) != (extraction_run_id, stage):
+                raise ValueError('Extraction task binding is immutable')
 
     def get_extraction_run(self, extraction_run_id):
         with self._db() as db:
