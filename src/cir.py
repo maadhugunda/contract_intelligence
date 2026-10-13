@@ -40,6 +40,7 @@ class CIRSnapshot(BaseModel):
     source_path: Optional[str] = None
     source_sha256: Optional[str] = None
     source_format: Optional[str] = None
+    pipeline_fingerprint: Optional[str] = None
     extraction_metadata: dict[str, Any] = Field(default_factory=dict)
     pages: list[dict[str, Any]] = Field(default_factory=list)
 

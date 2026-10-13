@@ -1,6 +1,7 @@
 import hashlib
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from task_registry import TaskRegistry, CommitStatus
 
@@ -8,6 +9,19 @@ DIGEST = hashlib.sha256(b'immutable output').hexdigest()
 OTHER = hashlib.sha256(b'different output').hexdigest()
 
 class RegistryTests(unittest.TestCase):
+    def test_concurrent_run_binding_only_accepts_one_source(self):
+        def bind(digest):
+            try:
+                self.registry.bind_extraction_run('run', 'D', 'V', digest, DIGEST)
+                return True
+            except ValueError:
+                return False
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(bind, [DIGEST, OTHER]))
+        self.assertEqual(sorted(results), [False, True])
+        accepted = self.registry.get_extraction_run('run')['source_sha256']
+        self.registry.bind_extraction_run('run', 'D', 'V', accepted, DIGEST)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

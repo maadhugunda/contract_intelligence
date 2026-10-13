@@ -16,9 +16,24 @@ from pydantic import BaseModel, Field
 try:
     from .cir import CIRSnapshot, Element
     from .section_structure import assign_section_parents, SECTION_STRUCTURE_VERSION
+    from .task_registry import TaskRegistry
 except ImportError:  # Support the repository's unittest discovery convention.
     from cir import CIRSnapshot, Element
     from section_structure import assign_section_parents, SECTION_STRUCTURE_VERSION
+    from task_registry import TaskRegistry
+
+
+def fingerprint(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
+                                     allow_nan=False).encode()).hexdigest()
+
+
+def pipeline_manifest(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Include engine/options and executable pipeline code, excluding source paths."""
+    root = Path(__file__).parent
+    return {'identity_contract_version': '2', 'settings': metadata,
+            'code_sha256': {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+                            for name in ('extraction.py', 'section_structure.py', 'cir.py')}}
 
 
 class ExtractionError(ValueError):
@@ -43,6 +58,7 @@ class ExtractedDocument(BaseModel):
     source_sha256: str
     source_format: str
     extraction_run_id: str
+    pipeline_fingerprint: str
     extraction_metadata: dict[str, Any]
     pages: list[PageExtraction]
 
@@ -64,6 +80,7 @@ class ExtractedDocument(BaseModel):
             extraction_run_id=self.extraction_run_id, elements=elements, relationships=relationships,
             source_path=self.source_path, source_sha256=self.source_sha256,
             source_format=self.source_format, extraction_metadata=self.extraction_metadata,
+            pipeline_fingerprint=self.pipeline_fingerprint,
             pages=[p.model_dump(exclude={'blocks'}) for p in self.pages],
         )
 
@@ -128,8 +145,14 @@ class PDFExtractor:
 
 
 class ExtractionService:
-    def __init__(self, adapters: dict[str, FormatExtractor] | None = None):
+    def __init__(self, adapters: dict[str, FormatExtractor] | None = None,
+                 run_registry: TaskRegistry | None = None):
         self.adapters = {'.pdf': PDFExtractor()} if adapters is None else adapters
+        if run_registry is None:
+            directory = Path(__file__).resolve().parents[1] / 'output' / 'extraction'
+            directory.mkdir(parents=True, exist_ok=True)
+            run_registry = TaskRegistry(str(directory / 'runs.sqlite'))
+        self.run_registry = run_registry
 
     def extract(self, source_path: str | Path, document_id: str, source_version_id: str,
                 *, expected_sha256: str | None = None,
@@ -150,17 +173,21 @@ class ExtractionService:
         metadata = {**metadata, 'section_structure_version': SECTION_STRUCTURE_VERSION}
         if not pages or [p.page_number for p in pages] != list(range(1, len(pages) + 1)):
             raise ExtractionError('Adapter must return every page in contiguous order')
-        identity = json.dumps([document_id, source_version_id, digest, metadata], sort_keys=True)
-        default_run_id = hashlib.sha256(identity.encode()).hexdigest()
+        manifest = pipeline_manifest(metadata)
+        pipeline_digest = fingerprint(manifest)
+        default_run_id = fingerprint([document_id, source_version_id, digest, pipeline_digest])
         run_id = extraction_run_id if extraction_run_id is not None else default_run_id
-        # A logical extraction ID is persisted by the caller before dispatching
-        # work. Attempt/lease IDs must never be used here. Bind element identity
-        # to source and pipeline too, so changed inputs cannot reuse block IDs.
-        element_namespace = (default_run_id if extraction_run_id is None else
-                             hashlib.sha256(json.dumps([run_id, default_run_id]).encode()).hexdigest())
+        try:
+            self.run_registry.bind_extraction_run(run_id, document_id, source_version_id,
+                                                  digest, pipeline_digest)
+        except ValueError as exc:
+            raise ExtractionError(str(exc)) from exc
+        element_namespace = fingerprint([run_id, default_run_id])
+        metadata = {**metadata, 'pipeline_manifest': manifest}
         for page in pages:
             page.provenance = {'document_id': document_id, 'source_version_id': source_version_id,
                                'source_path': str(path), 'source_sha256': digest,
+                               'extraction_run_id': run_id, 'pipeline_fingerprint': pipeline_digest,
                                'page_number': page.page_number,
                                'source_ref': f'{path.as_uri()}#page={page.page_number}'}
             for order, block in enumerate(page.blocks):
@@ -170,6 +197,7 @@ class ExtractionService:
         return ExtractedDocument(
             document_id=document_id, source_version_id=source_version_id, source_path=str(path),
             source_sha256=digest, source_format=path.suffix.lower()[1:], extraction_run_id=run_id,
+            pipeline_fingerprint=pipeline_digest,
             extraction_metadata=metadata, pages=pages,
         )
 

@@ -9,6 +9,8 @@ import unittest
 
 from cir import CIRSnapshot
 from extraction import ExtractionError, ExtractionService, PageExtraction, extract_document
+from task_registry import TaskRegistry
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 HAS_PDF = importlib.util.find_spec('fitz') is not None
@@ -30,7 +32,8 @@ class ExtractionTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / 'source.pdf'
         self.path.write_bytes(b'source bytes')
-        self.service = ExtractionService({'.pdf': StubAdapter()})
+        self.registry = TaskRegistry(str(Path(self.temp.name) / 'runs.sqlite'))
+        self.service = ExtractionService({'.pdf': StubAdapter()}, run_registry=self.registry)
 
     def test_deterministic_provenance_and_cir_roundtrip(self):
         result = self.service.extract(self.path, 'D1', 'V1')
@@ -69,10 +72,27 @@ class ExtractionTests(unittest.TestCase):
         copied.write_bytes(self.path.read_bytes())
         self.assertEqual(ids(original), ids(self.service.extract(copied, 'D', 'V', extraction_run_id='job-1')))
         self.path.write_bytes(b'changed source')
-        self.assertTrue(set(ids(original)).isdisjoint(ids(
-            self.service.extract(self.path, 'D', 'V', extraction_run_id='job-1'))))
+        with self.assertRaisesRegex(ExtractionError, 'already bound'):
+            self.service.extract(self.path, 'D', 'V', extraction_run_id='job-1')
         with self.assertRaises(ExtractionError):
             self.service.extract(self.path, 'D', 'V', extraction_run_id=' ')
+
+    def test_binding_survives_restart_and_rejects_pipeline_drift(self):
+        original = self.service.extract(self.path, 'D', 'V', extraction_run_id='bound-run')
+        restarted = ExtractionService({'.pdf': StubAdapter()},
+                         run_registry=TaskRegistry(str(Path(self.temp.name) / 'runs.sqlite')))
+        self.assertEqual(original, restarted.extract(self.path, 'D', 'V', extraction_run_id='bound-run'))
+        binding = self.registry.get_extraction_run('bound-run')
+        self.assertEqual(binding['source_sha256'], original.source_sha256)
+        self.assertEqual(binding['pipeline_fingerprint'], original.pipeline_fingerprint)
+        self.assertEqual(original.to_cir().pipeline_fingerprint, original.pipeline_fingerprint)
+        with patch('extraction.SECTION_STRUCTURE_VERSION', 'new-version'):
+            with self.assertRaisesRegex(ExtractionError, 'already bound'):
+                restarted.extract(self.path, 'D', 'V', extraction_run_id='bound-run')
+            fresh = restarted.extract(self.path, 'D', 'V', extraction_run_id='fresh-run')
+            self.assertNotEqual(fresh.pipeline_fingerprint, original.pipeline_fingerprint)
+        with self.assertRaisesRegex(ExtractionError, 'already bound'):
+            restarted.extract(self.path, 'Other-document', 'V', extraction_run_id='bound-run')
 
     def test_invalid_inputs(self):
         with self.assertRaises(ExtractionError):

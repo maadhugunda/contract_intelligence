@@ -39,6 +39,34 @@ class TaskRegistry:
                 event_id TEXT PRIMARY KEY, task_id TEXT NOT NULL,
                 event_type TEXT NOT NULL, created_at REAL NOT NULL,
                 FOREIGN KEY(task_id) REFERENCES tasks(task_id))''')
+            db.execute('''CREATE TABLE IF NOT EXISTS extraction_runs (
+                extraction_run_id TEXT PRIMARY KEY, document_id TEXT NOT NULL,
+                source_version_id TEXT NOT NULL, source_sha256 TEXT NOT NULL,
+                pipeline_fingerprint TEXT NOT NULL)''')
+
+    def bind_extraction_run(self, extraction_run_id, document_id, source_version_id,
+                            source_sha256, pipeline_fingerprint):
+        """Atomically register an immutable binding, or acknowledge an exact retry."""
+        values = (extraction_run_id, document_id, source_version_id,
+                  source_sha256, pipeline_fingerprint)
+        if any(not value or not value.strip() for value in values):
+            raise ValueError('Extraction run binding fields must be non-empty')
+        for digest in (source_sha256, pipeline_fingerprint):
+            if len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+                raise ValueError('Run fingerprints must be lowercase SHA-256 values')
+        with self._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('INSERT OR IGNORE INTO extraction_runs VALUES (?, ?, ?, ?, ?)', values)
+            row = db.execute('SELECT * FROM extraction_runs WHERE extraction_run_id=?',
+                             (extraction_run_id,)).fetchone()
+            if tuple(row) != values:
+                raise ValueError('Extraction run is already bound to a different source or pipeline')
+
+    def get_extraction_run(self, extraction_run_id):
+        with self._db() as db:
+            row = db.execute('SELECT * FROM extraction_runs WHERE extraction_run_id=?',
+                             (extraction_run_id,)).fetchone()
+            return dict(row) if row else None
 
     def _db(self):
         db = sqlite3.connect(self.path, timeout=10)

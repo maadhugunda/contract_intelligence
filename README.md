@@ -46,9 +46,24 @@ Every retry reuses that ID, including after a crash; lease generations and worke
 attempt IDs must not replace it. A deliberate new extraction of the same PDF gets
 a fresh run ID, producing distinct element IDs. Use `--extraction-run-id` in the
 CLI. Omitting the ID retains deterministic content-derived identity for local use.
-Element IDs also bind document/version, source hash and pipeline metadata: changing
-those inputs produces different IDs. Pin the engine/settings and pass
-`expected_sha256` on retries. This service currently re-extracts the full document;
+Run IDs are now atomically bound in a durable `extraction_runs` registry to the
+document/version, source SHA-256 and pipeline fingerprint. Reusing a run ID after
+any of these inputs change raises `ExtractionError`; it does not silently create
+new element IDs under the old run. The pipeline fingerprint includes engine/version,
+adapter/settings, section inference version and hashes of extraction, section and
+CIR model code. Paths and worker/lease identities are excluded. Output includes
+the fingerprint and its manifest for audit. Source bytes are hashed and extracted
+from the same in-memory copy; raw source remains untouched.
+
+The default registry is `output/extraction/runs.sqlite`. Workers participating in
+the same deployment must share a durable registry; inject `TaskRegistry` through
+`ExtractionService(run_registry=...)` for a configured database location. SQLite
+binding uses a transaction so concurrent first registrations cannot disagree.
+Bindings from before this contract cannot be reconstructed automatically; create
+new runs for legacy outputs. This version changes generated IDs.
+
+Pin the engine/settings and pass `expected_sha256` on retries. This service
+currently re-extracts the full document and checks the binding before returning it;
 stable block IDs support idempotent downstream writes, not partial extraction yet.
 
 ```python
