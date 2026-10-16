@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
+import math
 from typing import Any, Optional
 from pydantic import BaseModel, Field, model_validator
 
@@ -23,6 +24,28 @@ class Element(BaseModel):
     extraction_method: str
     confidence: Optional[float] = Field(default=None, ge=0, le=1)
     security_source_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def check_bounding_box(self):
+        content = self.structured_content or {}
+        bbox = content.get('bbox')
+        source_text = self.source_ref is not None and (
+            self.type in {ElementType.HEADING, ElementType.PARAGRAPH, ElementType.FOOTNOTE}
+            or bool(self.text and self.text.strip()))
+        if bbox is None:
+            if source_text:
+                raise ValueError(
+                    f'Source-backed text element {self.element_id!r} on page {self.page_number} '
+                    'requires structured_content.bbox = [left, top, right, bottom] in PDF points')
+            return self
+        if (not isinstance(bbox, (list, tuple)) or len(bbox) != 4
+                or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                       or not math.isfinite(value) for value in bbox)):
+            raise ValueError(f'Element {self.element_id!r} bbox must contain four finite numeric coordinates')
+        left, top, right, bottom = bbox
+        if right <= left or bottom <= top:
+            raise ValueError(f'Element {self.element_id!r} bbox must have positive width and height')
+        return self
 
 class Relationship(BaseModel):
     source_id: str

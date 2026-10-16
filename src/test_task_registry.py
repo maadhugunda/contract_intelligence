@@ -9,6 +9,21 @@ DIGEST = hashlib.sha256(b'immutable output').hexdigest()
 OTHER = hashlib.sha256(b'different output').hexdigest()
 
 class RegistryTests(unittest.TestCase):
+    def test_revision_binding_across_runs(self):
+        self.registry.bind_extraction_run('a', 'D', 'V', DIGEST, DIGEST)
+        self.registry.bind_extraction_run('b', 'D', 'V', DIGEST, OTHER)
+        with self.assertRaisesRegex(ValueError, 'Source revision') as conflict:
+            self.registry.bind_extraction_run('c', 'D', 'V', OTHER, DIGEST)
+        message = str(conflict.exception)
+        for expected in ("document 'D'", "revision 'V'", DIGEST, OTHER,
+                         '--source-version-id', 'stored revision was not changed'):
+            self.assertIn(expected, message)
+        self.assertIsNone(self.registry.get_extraction_run('c'))
+        self.registry.bind_extraction_run('d', 'D', 'V2', OTHER, DIGEST)
+        restarted = TaskRegistry(self.registry.path)
+        with self.assertRaisesRegex(ValueError, 'Source revision'):
+            restarted.bind_extraction_run('e', 'D', 'V', OTHER, DIGEST)
+
     def test_concurrent_run_binding_only_accepts_one_source(self):
         def bind(digest):
             try:

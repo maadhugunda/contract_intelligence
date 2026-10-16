@@ -50,6 +50,13 @@ class TaskRegistry:
             db.execute('''CREATE TABLE IF NOT EXISTS extraction_tasks (
                 task_id TEXT PRIMARY KEY, extraction_run_id TEXT NOT NULL,
                 stage TEXT NOT NULL)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS source_revisions (
+                document_id TEXT NOT NULL, source_version_id TEXT NOT NULL,
+                source_sha256 TEXT NOT NULL, PRIMARY KEY(document_id, source_version_id))''')
+            # Backfill old databases only when their history is unambiguous.
+            db.execute('''INSERT OR IGNORE INTO source_revisions
+                SELECT document_id, source_version_id, MIN(source_sha256) FROM extraction_runs
+                GROUP BY document_id, source_version_id HAVING COUNT(DISTINCT source_sha256)=1''')
 
     def bind_extraction_run(self, extraction_run_id, document_id, source_version_id,
                             source_sha256, pipeline_fingerprint, *, pipeline_manifest=None,
@@ -64,11 +71,38 @@ class TaskRegistry:
                 raise ValueError('Run fingerprints must be lowercase SHA-256 values')
         with self._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            legacy = db.execute('''SELECT COUNT(DISTINCT source_sha256) FROM extraction_runs
+                WHERE document_id=? AND source_version_id=?''', (document_id, source_version_id)).fetchone()[0]
+            if legacy > 1:
+                raise ValueError('Source revision has conflicting legacy hashes; resolve its history first')
             db.execute('INSERT OR IGNORE INTO extraction_runs VALUES (?, ?, ?, ?, ?)', values)
             row = db.execute('SELECT * FROM extraction_runs WHERE extraction_run_id=?',
                              (extraction_run_id,)).fetchone()
             if tuple(row) != values:
-                raise ValueError('Extraction run is already bound to a different source or pipeline')
+                names = ('extraction_run_id', 'document_id', 'source_version_id',
+                         'source_sha256', 'pipeline_fingerprint')
+                changes = [f'{name}: registered={old!r}, submitted={new!r}'
+                           for name, old, new in zip(names, tuple(row), values) if old != new]
+                raise ValueError(
+                    f'Extraction run {extraction_run_id!r} is already bound to a different source or pipeline.\n'
+                    + '\n'.join(changes)
+                    + '\nFor a retry, use the original source, revision and pipeline. '
+                    'For a new extraction, omit --extraction-run-id during planning to generate a new run. '
+                    'If the file bytes changed, also provide a new --source-version-id.')
+            db.execute('INSERT OR IGNORE INTO source_revisions VALUES (?, ?, ?)',
+                       (document_id, source_version_id, source_sha256))
+            revision = db.execute('SELECT source_sha256 FROM source_revisions WHERE document_id=? AND source_version_id=?',
+                                  (document_id, source_version_id)).fetchone()
+            if revision[0] != source_sha256:
+                raise ValueError(
+                    f'Source revision conflict for document {document_id!r}, revision {source_version_id!r}.\n'
+                    f'Registered SHA-256: {revision[0]}\n'
+                    f'Submitted SHA-256:  {source_sha256}\n'
+                    'The submitted file contains different bytes from the registered revision. '
+                    'Submit the updated file with a new --source-version-id and a new extraction run '
+                    '(omit --extraction-run-id during planning to generate one). '
+                    'To retry the existing revision, use the original file. '
+                    'Registration was rejected; the stored revision was not changed.')
             if pipeline_manifest is not None:
                 if not source_format:
                     raise ValueError('Planned run requires source format')
@@ -91,6 +125,10 @@ class TaskRegistry:
             if row is None:
                 return None
             result = dict(row)
+            hashes = db.execute('SELECT DISTINCT source_sha256 FROM extraction_runs WHERE document_id=? AND source_version_id=?',
+                                (result['document_id'], result['source_version_id'])).fetchall()
+            if len(hashes) > 1:
+                raise ValueError('Source revision has conflicting legacy hashes; resolve its history first')
             result['pipeline_manifest'] = json.loads(result['pipeline_manifest'])
             return result
 

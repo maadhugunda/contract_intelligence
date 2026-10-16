@@ -43,7 +43,10 @@ An artifact resolver/storage layer must map this identity to actual source bytes
 the URN is not itself a download URL.
 
 CIR validates ordered contiguous page records, element page membership and unique
-per-page order, artifact hashes and page/block provenance, heading parents, and
+per-page order. Source-backed text requires `structured_content.bbox` with four
+finite numeric coordinates and positive width/height; malformed geometry blocks
+serialization. Derived text without source references may omit geometry.
+CIR also validates artifact hashes and page/block provenance, heading parents, and
 relationship endpoints. Duplicate/self relationships are rejected. Continuation
 links must connect adjacent-page paragraphs within the same section. Legacy CIR
 without an artifact reference may omit pages; new artifact-backed output cannot.
@@ -54,13 +57,24 @@ Each page retains text, dimensions, rotation and source provenance. Ordered text
 blocks retain lines, spans, font attributes and bounding boxes; image blocks retain
 placement and metadata. CIR elements carry this layout in `structured_content`.
 Blank or image-only pages remain present with a warning. Source files are never
-modified. Run and element IDs are deterministic for the same document, version,
-source bytes and extraction engine metadata. Workers should pass an explicit
+modified. Element IDs are deterministic within the same run, document, version,
+source bytes and extraction engine metadata. Workers should pass the persisted
 `extraction_run_id` created and persisted when the logical extraction is queued.
 Every retry reuses that ID, including after a crash; lease generations and worker
 attempt IDs must not replace it. A deliberate new extraction of the same PDF gets
 a fresh run ID, producing distinct element IDs. Use `--extraction-run-id` in the
-CLI. Omitting the ID retains deterministic content-derived identity for local use.
+CLI. Omitting the ID during planning creates a fresh run with a sanitized short
+document/revision prefix and full UUID4 (for example `HC001-MSA_v1_<uuid>`).
+Prefixes are informational; workers read authoritative metadata from the registry.
+Calling local extraction again without the previous ID creates a new extraction,
+not a retry. Retry using `execute_run(path, persisted_run_id)`.
+
+The registry binds `(document_id, source_version_id)` to exactly one source hash
+across all runs. Changed bytes require a new revision; unchanged bytes may be
+re-extracted with a new run or pipeline. Existing consistent bindings are backfilled.
+Conflicting legacy revisions are blocked pending explicit history correction;
+their hashes are never silently overwritten. Revision assignment remains a caller
+responsibility until an ingestion service is added.
 Run IDs are now atomically bound in a durable `extraction_runs` registry to the
 document/version, source SHA-256 and pipeline fingerprint. Reusing a run ID after
 any of these inputs change raises `ExtractionError`; it does not silently create
@@ -121,6 +135,14 @@ stage)` to persist an immutable association with a declared stage before leasing
 The current worker executes the full document pipeline; separate per-stage/page
 workers and dispatch are not implemented. Legacy bindings without a persisted
 manifest cannot be executed by workers; plan a new run.
+
+CLI file exports write and fsync a temporary sibling file, then atomically replace
+the requested path. Failures before replacement preserve the old output; an abrupt
+process kill can leave a temporary file but does not expose a partially written
+destination. This is a local export, not production ingestion publication: output
+paths are mutable, concurrent writers are last-writer-wins, and exports are not
+connected to task leases, fenced commits or immutable run-scoped artifacts.
+Directory-entry durability across power loss is not guaranteed by this helper.
 
 Reading order uses PyMuPDF's geometric block ordering. Section numbers are kept
 verbatim. During CIR conversion, `src/section_structure.py` detects standalone

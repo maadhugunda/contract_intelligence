@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from uuid import uuid4
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -26,6 +28,13 @@ except ImportError:  # Support the repository's unittest discovery convention.
 def fingerprint(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
                                      allow_nan=False).encode()).hexdigest()
+
+
+def create_run_id(document_id: str, source_revision_id: str) -> str:
+    """Readable labels are hints only; UUID and registry define run identity."""
+    def prefix(value):
+        return re.sub(r'[^A-Za-z0-9-]+', '-', value).strip('-')[:24] or 'unknown'
+    return f'{prefix(document_id)}_{prefix(source_revision_id)}_{uuid4()}'
 
 
 def pipeline_manifest(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -182,8 +191,7 @@ class ExtractionService:
         metadata = {**adapter.describe(), 'section_structure_version': SECTION_STRUCTURE_VERSION}
         manifest = pipeline_manifest(metadata)
         pipeline_digest = fingerprint(manifest)
-        default_run_id = fingerprint([document_id, source_version_id, digest, pipeline_digest])
-        run_id = extraction_run_id if extraction_run_id is not None else default_run_id
+        run_id = extraction_run_id if extraction_run_id is not None else create_run_id(document_id, source_version_id)
         try:
             self.run_registry.bind_extraction_run(run_id, document_id, source_version_id,
                                                   digest, pipeline_digest, pipeline_manifest=manifest,
@@ -250,7 +258,7 @@ def extract_document(source_path: str | Path, document_id: str, source_version_i
                      extraction_run_id: str | None = None) -> ExtractedDocument:
     """Retries reuse extraction_run_id; new logical extractions use a fresh ID.
 
-    Omitting it retains deterministic content-derived identity for local use.
+    Omitting it creates a fresh document/revision-prefixed UUID run.
     Caller must persist the ID and pin source hash/engine settings across retries.
     """
     return ExtractionService().extract(source_path, document_id, source_version_id,

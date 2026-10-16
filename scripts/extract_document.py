@@ -6,8 +6,9 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.extraction import ExtractionService
+from src.extraction import ExtractionService, ExtractionError
 from src.task_registry import TaskRegistry
+from src.artifact_io import write_text_atomic
 import json
 
 
@@ -17,7 +18,7 @@ def main():
     parser.add_argument('--document-id')
     parser.add_argument('--source-version-id')
     parser.add_argument('--expected-sha256')
-    parser.add_argument('--extraction-run-id', help='Persist and reuse for retries; use a fresh ID for a new extraction')
+    parser.add_argument('--extraction-run-id', help='Reuse for retries; omit during planning to generate a prefixed UUID')
     parser.add_argument('--format', choices=['extraction', 'cir'], default='cir')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--mode', choices=['local', 'plan', 'worker'], default='local')
@@ -40,10 +41,17 @@ def main():
                                        expected_sha256=args.expected_sha256, extraction_run_id=args.extraction_run_id))
         payload = (result.to_cir() if args.format == 'cir' else result).model_dump_json(indent=2)
     if args.output:
-        args.output.write_text(payload + '\n', encoding='utf-8')
+        write_text_atomic(args.output, payload + '\n')
     else:
         print(payload)
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except ExtractionError as exc:
+        print(f'Extraction failed: {exc}', file=sys.stderr)
+        sys.exit(1)
+    except OSError as exc:
+        print(f'File operation failed: {exc}', file=sys.stderr)
+        sys.exit(1)

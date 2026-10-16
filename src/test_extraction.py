@@ -8,7 +8,8 @@ import tempfile
 import unittest
 
 from cir import CIRSnapshot
-from extraction import ExtractionError, ExtractionService, PageExtraction, extract_document
+from extraction import ExtractionError, ExtractionService, PageExtraction, extract_document, create_run_id
+from uuid import UUID
 from task_registry import TaskRegistry
 from unittest.mock import patch
 from pydantic import ValidationError
@@ -30,6 +31,23 @@ class StubAdapter:
 
 
 class ExtractionTests(unittest.TestCase):
+    def test_new_runs_get_prefixed_uuid_and_retries_keep_ids(self):
+        first = self.service.extract(self.path, 'D', 'V')
+        second = self.service.extract(self.path, 'D', 'V')
+        self.assertNotEqual(first.extraction_run_id, second.extraction_run_id)
+        self.assertTrue(first.extraction_run_id.startswith('D_V_'))
+        self.assertEqual(UUID(first.extraction_run_id.split('_')[-1]).version, 4)
+        self.assertNotEqual(first.pages[0].blocks[0]['element_id'], second.pages[0].blocks[0]['element_id'])
+        self.assertEqual(first, self.service.execute_run(self.path, first.extraction_run_id))
+        self.path.write_bytes(b'updated document')
+        with self.assertRaisesRegex(ExtractionError, 'Source revision'):
+            self.service.plan_run(self.path, 'D', 'V', extraction_run_id='rejected-new-run')
+        self.assertIsNone(self.registry.get_extraction_run('rejected-new-run'))
+        self.service.plan_run(self.path, 'D', 'V2')
+        safe = create_run_id('../Document name/' * 10, 'revision/2')
+        self.assertNotIn('/', safe)
+        self.assertLessEqual(len(safe), 86)
+
     def test_worker_requires_planning_and_checks_before_extraction(self):
         adapter = self.service.adapters['.pdf']
         with patch.object(adapter, 'extract', wraps=adapter.extract) as extract:
@@ -68,7 +86,7 @@ class ExtractionTests(unittest.TestCase):
 
     def test_deterministic_provenance_and_cir_roundtrip(self):
         result = self.service.extract(self.path, 'D1', 'V1')
-        self.assertEqual(result, self.service.extract(self.path, 'D1', 'V1'))
+        self.assertEqual(result, self.service.execute_run(self.path, result.extraction_run_id))
         self.assertEqual(len(result.pages), 2)
         cir = CIRSnapshot.model_validate_json(result.to_cir().model_dump_json())
         self.assertEqual(cir.source_revision_id, 'V1')
@@ -91,10 +109,10 @@ class ExtractionTests(unittest.TestCase):
         result = self.service.extract(self.path, 'D', 'V')
         moved = self.path.with_name('moved.pdf')
         moved.write_bytes(self.path.read_bytes())
-        self.assertEqual(result, self.service.extract(moved, 'D', 'V'))
+        self.assertEqual(result, self.service.execute_run(moved, result.extraction_run_id))
         self.assertNotIn(str(self.path), result.model_dump_json())
         self.assertEqual(result.source_artifact_ref, 'urn:sha256:' + result.source_sha256)
-        for case in ('missing_page', 'duplicate_page', 'wrong_ref', 'wrong_artifact', 'provenance', 'order'):
+        for case in ('missing_page', 'duplicate_page', 'wrong_ref', 'wrong_artifact', 'provenance', 'order', 'missing_bbox'):
             with self.subTest(case=case):
                 payload = result.to_cir().model_dump()
                 if case == 'missing_page':
@@ -107,6 +125,8 @@ class ExtractionTests(unittest.TestCase):
                     payload['source_artifact_ref'] = 'urn:sha256:' + '0' * 64
                 elif case == 'provenance':
                     payload['pages'][0]['provenance']['document_id'] = 'other'
+                elif case == 'missing_bbox':
+                    payload['elements'][0]['structured_content'].pop('bbox')
                 else:
                     payload['elements'][1]['order'] = 0
                 with self.assertRaises(ValidationError):
@@ -156,7 +176,7 @@ class ExtractionTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             self.service.extract(self.path.with_name('missing.pdf'), 'D', 'V')
         with self.assertRaises(ExtractionError):
-            ExtractionService({}).extract(self.path, 'D', 'V')
+            ExtractionService({}, run_registry=self.registry).extract(self.path, 'D', 'V')
 
     def test_missing_page_rejected(self):
         class BrokenAdapter:
@@ -165,20 +185,25 @@ class ExtractionTests(unittest.TestCase):
             def extract(self, content):
                 return [PageExtraction(page_number=2, width=1, height=1, rotation=0, text='')], {}
         with self.assertRaisesRegex(ExtractionError, 'every page'):
-            ExtractionService({'.pdf': BrokenAdapter()}).extract(self.path, 'D', 'V')
+            ExtractionService({'.pdf': BrokenAdapter()}, run_registry=self.registry).extract(self.path, 'D', 'V')
 
 
 @unittest.skipUnless(HAS_PDF, 'PyMuPDF is not installed')
 class PDFIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.service = ExtractionService(run_registry=TaskRegistry(str(Path(temp.name) / 'runs.sqlite')))
     def test_dataset_hashes_pages_text_and_determinism(self):
         import fitz
         manifest = json.loads((ROOT / 'datasets/d0/manifest.json').read_text())
         for entry in manifest['documents']:
             with self.subTest(document=entry['document_id']):
                 path = ROOT / 'datasets/d0/contracts' / entry['file']
-                result = extract_document(path, entry['document_id'], 'v1', expected_sha256=entry['sha256'])
+                result = self.service.extract(path, entry['document_id'], 'v1', expected_sha256=entry['sha256'])
                 self.assertEqual(result.document_id, entry['document_id'])
-                self.assertEqual(result, extract_document(path, entry['document_id'], 'v1'))
+                self.assertEqual(result, self.service.execute_run(path, result.extraction_run_id))
+
                 with fitz.open(path) as pdf:
                     self.assertEqual(len(result.pages), len(pdf))
                     for page, extracted in zip(pdf, result.pages):
@@ -207,10 +232,10 @@ class PDFIntegrationTests(unittest.TestCase):
             with fitz.open() as pdf:
                 pdf.new_page()
                 path.write_bytes(pdf.tobytes())
-            result = extract_document(path, 'D', 'V')
+            result = self.service.extract(path, 'D', 'V')
             self.assertEqual(len(result.pages), 1)
             self.assertTrue(result.pages[0].warnings)
             self.assertEqual(len(result.to_cir().pages), 1)
             path.write_bytes(b'not a pdf')
             with self.assertRaises(ExtractionError):
-                extract_document(path, 'D', 'V')
+                self.service.extract(path, 'D', 'V2')

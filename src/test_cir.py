@@ -3,6 +3,22 @@ from pydantic import ValidationError
 from cir import CIRSnapshot, Element, Relationship
 
 class CIRTests(unittest.TestCase):
+    def test_source_text_requires_valid_bbox(self):
+        base = dict(element_id='E', page_number=1, order=0, type='paragraph',
+                    text='Evidence', source_ref='urn:sha256:source#page=1&block=0', extraction_method='native')
+        for bbox in (None, [], [1, 2, 3], [1, 2, 3, 4, 5],
+                     [0, 0, '10', 20], [False, 0, 10, 20],
+                     [0, 0, float('nan'), 20], [0, 0, float('inf'), 20],
+                     [10, 0, 0, 20], [0, 20, 10, 0], [0, 0, 0, 20]):
+            with self.subTest(bbox=bbox), self.assertRaises(ValidationError):
+                Element(**base, structured_content={'bbox': bbox})
+        valid = Element(**base, structured_content={'bbox': [0, 0, 10, 20]})
+        self.assertEqual(valid.structured_content['bbox'], [0, 0, 10, 20])
+        for kind in ('heading', 'footnote'):
+            with self.assertRaises(ValidationError):
+                Element(**{**base, 'type': kind})
+        # Derived text without a source reference need not invent geometry.
+        Element(**{**base, 'source_ref': None})
     def test_invalid_relationships(self):
         heading = Element(element_id='H', page_number=1, order=0, type='heading', extraction_method='native')
         first = Element(element_id='A', page_number=1, order=1, type='paragraph', parent_id='H', extraction_method='native')
